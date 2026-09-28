@@ -167,12 +167,83 @@ def hospitalizations():
     return hs, pop, flows, chn, dg
 
 
+AGE_BINS = ["00", "01-04", "05-14", "15-24", "25-34", "35-44", "45-54", "55-64", "65-74", "75-84", "85_v"]
+ROMAN_CH = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX", "XXI", "XXII"]
+MIN_CODE_HOSP = 30  # 3-digit codes below this yearly maximum in SR are only counted within their group
+
+
+def diagnoses():
+    """Hospitalizations by ICD-10 code x facility region and by code x sex x age, 2020+."""
+    files = sorted(glob.glob(str(DATA / "nczi_diagnozy" / "*.xlsx")))
+    dataset = lambda f: pd.read_excel(f, sheet_name=next(s for s in pd.ExcelFile(f).sheet_names if s.startswith("Dataset")), dtype=str)
+    terr = [SR] + [k + " kraj" for k in KR]
+    code_group, groups, codes = {}, {}, {}
+    age = {"ch": {}, "gr": {}, "cd": {}}
+    for f in [f for f in files if "diagnoza_vek" in f]:
+        v = dataset(f)
+        v = v.rename(columns={c: "HOSP" for c in v.columns if c.startswith("HOSP")})
+        v["HOSP"] = pd.to_numeric(v["HOSP"], errors="coerce").fillna(0)
+        v = v[v.VEK_SKUP_10.isin(AGE_BINS)]
+        y = v.ROK_SPRAC.iloc[0]
+        v["ch"] = v.DIAG_HOSP_KAP.map(lambda c: ROMAN_CH[int(c) - 1])
+        for r in v[["DIAG_HOSP_OD", "DIAGNOZA_POPIS", "DIAG_HOSP_SKUP", "DIAG_SKUP_POPIS", "ch"]].drop_duplicates("DIAG_HOSP_OD").itertuples(index=False):
+            code_group[r[0]] = r[2]
+            codes.setdefault(r[0], {"n": " ".join(str(r[1]).split())})
+            groups.setdefault(r[2], {"n": " ".join(str(r[3]).split()).replace(" - ", "–").replace("( ", "(").replace(" )", ")"), "c": r[4]})
+        v["col"] = v.POHLAVIE.map({"1": 0, "2": 1}) * len(AGE_BINS) + v.VEK_SKUP_10.map(AGE_BINS.index)
+        v = v.dropna(subset=["col"])
+        for level, key in [("ch", "ch"), ("gr", "DIAG_HOSP_SKUP"), ("cd", "DIAG_HOSP_OD")]:
+            for k, s in v.groupby(key):
+                arr = [0] * (2 * len(AGE_BINS))
+                for c, h in s.groupby("col")["HOSP"].sum().items():
+                    arr[int(c)] = int(h)
+                age[level].setdefault(k, {})[y] = arr
+        allv = [0] * (2 * len(AGE_BINS))
+        for c, h in v.groupby("col")["HOSP"].sum().items():
+            allv[int(c)] = int(h)
+        age["ch"].setdefault("ALL", {})[y] = allv
+    uz = {"ch": {}, "gr": {}, "cd": {}}
+    for f in [f for f in files if "uzemie" in f]:
+        d = dataset(f)
+        y = d.ROK_SPRAC.iloc[0]
+        for c in ["HOSP_SPOLU", "DLHOSP_SPOLU", "UMRTIA_SPOLU"]:
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0).astype(int)
+        d["t"] = d.UZEMIEZZ_POPIS.str.strip().map(lambda s: terr.index(s) if s in terr else -1)
+        d = d[d.t >= 0]
+        def put(level, key, rows):
+            arr = [0] * (3 * len(terr))
+            for r in rows.itertuples(index=False):
+                arr[3 * r.t:3 * r.t + 3] = [int(r.HOSP_SPOLU), int(r.DLHOSP_SPOLU), int(r.UMRTIA_SPOLU)]
+            uz[level].setdefault(key, {})[y] = arr
+        put("ch", "ALL", d[d.DIAGNOZA_AGR == "SP"])
+        for c, s in d[d.DIAGNOZA_AGR == "KPT"].groupby("DIAGNOZA_KOD"):
+            put("ch", ROMAN_CH[int(c) - 1], s)
+        kod = d[d.DIAGNOZA_AGR == "KOD"]
+        for c, s in kod.groupby("DIAGNOZA_KOD"):
+            put("cd", c, s)
+        kod = kod.assign(g=kod.DIAGNOZA_KOD.map(code_group))
+        for g, s in kod.dropna(subset=["g"]).groupby("g"):
+            s = s.groupby("t", as_index=False)[["HOSP_SPOLU", "DLHOSP_SPOLU", "UMRTIA_SPOLU"]].sum()
+            put("gr", g, s)
+    keep = {c for c, ys in uz["cd"].items() if max(a[0] for a in ys.values()) >= MIN_CODE_HOSP and c in code_group}
+    out = {"bins": AGE_BINS, "ch": {}, "gr": {}, "cd": {}}
+    for c in uz["ch"]:
+        out["ch"][c] = {"uz": uz["ch"][c], "age": age["ch"].get(c, {})}
+    for g, meta in groups.items():
+        if g in uz["gr"]:
+            out["gr"][g] = {**meta, "uz": uz["gr"][g], "age": age["gr"].get(g, {})}
+    for c in sorted(keep):
+        out["cd"][c] = {**codes[c], "g": code_group[c], "uz": uz["cd"][c], "age": age["cd"].get(c, {})}
+    return out
+
+
 def main():
     stats, years = network()
     hosp, groups = hospitals()
     hs, pop, flows, chn, dg = hospitalizations()
+    dx = diagnoses()
     data = {"groups": groups, "stats": stats, "hosp": hosp, "shapes": shapes(), "years": years,
-            "hs": hs, "popY": pop, "flows": flows, "chn": chn, "dg": dg, "hyears": sorted(pop)}
+            "hs": hs, "popY": pop, "flows": flows, "chn": chn, "dg": dg, "dx": dx, "hyears": sorted(pop)}
     html = (ROOT / "template.html").read_text().replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
     (ROOT / "index.html").write_text(html)
     print(f"index.html: {len(html) // 1024} kB, years {years[0]}–{years[-1]} / {sorted(pop)[0]}–{sorted(pop)[-1]}, {len(hosp)} hospitals")
