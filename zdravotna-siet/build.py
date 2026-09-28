@@ -1,4 +1,4 @@
-"""Builds index.html from the source files in data/: python3 build.py"""
+"""Builds public/index.html from the source files in data/: python3 build.py"""
 import glob, json, math, re
 from pathlib import Path
 import pandas as pd
@@ -245,8 +245,9 @@ def main():
     data = {"groups": groups, "stats": stats, "hosp": hosp, "shapes": shapes(), "years": years,
             "hs": hs, "popY": pop, "flows": flows, "chn": chn, "dg": dg, "dx": dx, "hyears": sorted(pop)}
     html = (ROOT / "template.html").read_text().replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
-    (ROOT / "index.html").write_text(html)
-    print(f"index.html: {len(html) // 1024} kB, years {years[0]}–{years[-1]} / {sorted(pop)[0]}–{sorted(pop)[-1]}, {len(hosp)} hospitals")
+    (ROOT / "public").mkdir(exist_ok=True)
+    (ROOT / "public" / "index.html").write_text(html)
+    print(f"public/index.html: {len(html) // 1024} kB, years {years[0]}–{years[-1]} / {sorted(pop)[0]}–{sorted(pop)[-1]}, {len(hosp)} hospitals")
 
 
 if __name__ == "__main__":
